@@ -1,0 +1,34 @@
+name = Open Atrium Workbench
+description = Integrates Workbench with Open Atrium
+core = 7.x
+package = Open Atrium
+dependencies[] = ctools
+dependencies[] = defaultconfig
+dependencies[] = features
+dependencies[] = oa_core
+dependencies[] = oa_layouts
+dependencies[] = og
+dependencies[] = strongarm
+dependencies[] = views
+dependencies[] = views_content
+dependencies[] = workbench
+dependencies[] = workbench_moderation
+dependencies[] = workbench_moderation_profile
+dependencies[] = workbench_moderation_profile_og
+features[ctools][] = views:views_default:3.0
+features[defaultconfig][] = user_default_permissions:access workbench
+features[defaultconfig][] = user_default_permissions:use workbench_moderation my drafts tab
+features[defaultconfig][] = user_default_permissions:use workbench_moderation needs review tab
+features[defaultconfig][] = user_default_permissions:view moderation history
+features[defaultconfig][] = user_default_permissions:view moderation messages
+features[features_api][] = api:2
+features[views_view][] = oa_workbench
+features[workbench_moderation_transitions][] = draft:published
+features_exclude[dependencies][oa_workbench] = oa_workbench
+
+; Information added by Drupal.org packaging script on 2015-05-05
+version = "7.x-2.0"
+core = "7.x"
+project = "oa_workbench"
+datestamp = "1430861887"
+

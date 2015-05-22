@@ -1,0 +1,358 @@
+<?php
+/**
+ * @file
+ * Code for the Open Atrium Workbench feature.
+ */
+
+include_once 'oa_workbench.features.inc';
+
+/**
+ * Implements hook_ctools_plugin_directory().
+ */
+function oa_workbench_ctools_plugin_directory($owner, $plugin_type) {
+  if ($owner == 'ctools') {
+    return 'plugins/' . $plugin_type;
+  }
+}
+
+/**
+ * Implements hook_block_info_alter().
+ */
+function oa_workbench_block_info_alter(&$blocks, $theme, $code_blocks) {
+  if (isset($blocks['workbench']['block'])) {
+    // Don't place it in a region by default. Workbench normally wants to place
+    // this at the top of the 'content' region.
+    $blocks['workbench']['block']['region'] = -1;
+    $blocks['workbench']['block']['weight'] = 0;
+  }
+}
+
+/**
+ * Implements hook_node_view().
+ *
+ * Necessary in order to trigger the workbench_moderation_messages() because
+ * workbench_moderation_node_view() only triggers it on $view_mode == 'full'
+ * and we need it to trigger on $view_mode == 'page_manager'.
+ *
+ * @todo Remove once the patch from #1462724 is accepted upstream:
+ *       https://drupal.org/node/1462724
+ *
+ * @see workbench_moderation_node_view()
+ */
+function oa_workbench_node_view($node, $view_mode = 'full') {
+  // Show moderation state messages if we're on a node page.
+  if (node_is_page($node) && $view_mode == 'page_manager' && empty($node->in_preview)) {
+    workbench_moderation_messages('view', $node);
+  }
+}
+
+/**
+ * Implements hook_strongarm_alter().
+ */
+function oa_workbench_strongarm_alter(&$items) {
+  if (isset($items['contextual_tabs_extract'])) {
+    $items['contextual_tabs_extract']->value .= "\n" . implode("\n", array(
+      "View published",
+      "View draft",
+      "New draft,icon-pencil",
+      "Edit draft,icon-pencil",
+    ));
+  }
+}
+
+/**
+ * Implements hook_og_permission().
+ */
+function oa_workbench_og_permission() {
+  $perms = array(
+    // This is a Space-specific version of workbench_moderation's permission.
+    'view all unpublished content' => array(
+      'title' => t('View all unpublished content'),
+      'default role' => array(OG_ADMINISTRATOR_ROLE),
+    ),
+  );
+
+  // Add permissions for all the transitions.
+  foreach (workbench_moderation_transitions() as $transition) {
+    $from_state = $transition->from_name;
+    $to_state = $transition->to_name;
+
+    $perm = array(
+      'title' => t('Moderate all content from %from_state to %to_state', array('%from_state' => workbench_moderation_state_label($from_state), '%to_state' => workbench_moderation_state_label($to_state))),
+    );
+
+    // By default, give all permissions to all members, except for the
+    // 'published' state, which will go to group admins by default.
+    if ($to_state == workbench_moderation_state_published()) {
+      $perm['default role'] = array(OG_ADMINISTRATOR_ROLE);
+    }
+    else {
+      $perm['default role'] = array(OG_AUTHENTICATED_ROLE, OG_ADMINISTRATOR_ROLE);
+    }
+
+    $perms["moderate content from $from_state to $to_state"] = $perm;
+  }
+
+  return $perms;
+}
+
+/**
+ * Gets the name of the permission for performing a particular transition.
+ *
+ * @param string $from_state
+ *   The machine name of the state we want to transition from.
+ * @param string $to_state
+ *   The machine name of the state we want to transition to.
+ *
+ * @return string
+ *   The full permission machine name for this transition.
+ */
+function oa_workbench_permission_name($from_state, $to_state) {
+  return "moderate content from $from_state to $to_state";
+}
+
+/**
+ * Implements hook_workbench_moderation_states_next_alter().
+ */
+function oa_workbench_workbench_moderation_states_next_alter(&$states, $current_state, $context) {
+  $account = $context['account'];
+  $node = $context['node'];
+
+  // Remove states that the user doesn't have permission to transition to.
+  if ($states && og_is_group_content_type('node', $node->type) &&
+    (($space_nid = oa_core_get_group_from_node($node->nid)) || ($space_nid = oa_core_get_space_context()))) {
+    $space = node_load($space_nid);
+    if ($space) {
+      // See if OA Workbench Access is enabled.
+      $oa_workbench_access = module_exists('oa_workbench_access');
+      foreach ($states as $machine_name => $label) {
+        // Get the permission we want to check for.
+        $permission = oa_workbench_permission_name($current_state, $machine_name);
+        // If OA Workbench Access is enabled we check permissions on a deeper
+        // level, like 'Team permissions'.
+        if ($oa_workbench_access) {
+          if (!oa_workbench_access($space, $permission, $account)) {
+            unset($states[$machine_name]);
+          }
+        }
+        else {
+          // Check the default OG access for a space.
+          if (!og_user_access('node', $space->nid, $permission, $account)) {
+            unset($states[$machine_name]);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function oa_workbench_form_node_form_alter(&$form, &$form_state) {
+  $node = $form['#node'];
+
+  if (workbench_moderation_node_moderated($node)) {
+    // If this node is moderated and there are both the 'Publish' and
+    // 'Save draft' buttons, we hide the 'Publish' button since workbench
+    // won't allow us to immediately publish anyway.
+    if (!empty($form['actions']['draft']) && !empty($form['actions']['submit'])) {
+      $form['actions']['submit']['#access'] = FALSE;
+    }
+  }
+}
+
+/**
+ * Implements hook_module_implements().
+ */
+function oa_workbench_module_implements_alter(&$implementations, $hook) {
+  if ($hook == 'form_alter' && isset($implementations['oa_workbench'])) {
+    // Put the oa_workbench hook at the end so it comes after 'save_draft'.
+    $group = $implementations['oa_workbench'];
+    unset($implementations['oa_workbench']);
+    $implementations['oa_workbench'] = $group;
+  }
+}
+
+/**
+ * Implements hook_node_access().
+ *
+ * Allows users with the Space-specific 'view all unpublished content'
+ * permission to do so with content in their Spaces.
+ */
+function oa_workbench_node_access($node, $op, $account) {
+  if ($op == 'view' && !$node->status && og_is_group_content_type('node', $node->type) && ($space_nid = oa_core_get_group_from_node($node->nid)) && og_user_access('node', $space_nid, 'view all unpublished content')) {
+    return NODE_ACCESS_ALLOW;
+  }
+  return NODE_ACCESS_IGNORE;
+}
+
+/**
+ * Preprocess function for 'oa_user_badge' theme function.
+ */
+function oa_workbench_preprocess_oa_user_badge(&$vars) {
+  if (user_access('access workbench')) {
+    $vars['links']['#links']['oa_workbench'] = array(
+      'title' => t('My workbench'),
+      'href' => 'admin/workbench',
+    );
+  }
+}
+
+/**
+ * Sets up default permissions for a list of transitions.
+ *
+ * @param array $transitions
+ *   An array of transition objects.
+ */
+function oa_workbench_setup_default_permissions(array $transitions) {
+  // Ensure Drupal sees the latest list of transitions, so it generates
+  // permissions for them all.
+  drupal_static_reset('workbench_moderation_transitions');
+
+  $drupal_permissions = array();
+  $drupal_admin_role = user_role_load_by_name('administrator');
+  $drupal_admin_rid = isset($admin_role) ? $admin_role->rid : 0;
+
+  $og_permissions = array();
+  $og_roles = array_flip(og_roles('node', 'oa_space'));
+  $og_member_rid = $og_roles[OG_AUTHENTICATED_ROLE];
+  $og_admin_rid = $og_roles[OG_ADMINISTRATOR_ROLE];
+
+  foreach ($transitions as $transition) {
+    $from_state = $transition->from_name;
+    $to_state = $transition->to_name;
+
+    // All transitions allowed for all authenticated users as
+    // og_permissions takes care of restricting this per space.
+    $perm = "moderate content from $from_state to $to_state";
+    $drupal_permissions[$drupal_admin_rid][$perm] = TRUE;
+    $drupal_permissions[DRUPAL_AUTHENTICATED_RID][$perm] = TRUE;
+
+    // Allow administrator members to perform all transations,
+    // and authenticated users to put things up for review.
+    $og_permissions[$og_admin_rid][$perm] = TRUE;
+    if (in_array($from_state, array('draft', 'needs_review')) && in_array($to_state, array('draft', 'needs_review'))) {
+      $og_permissions[$og_member_rid][$perm] = TRUE;
+    }
+  }
+
+  // Set global Drupal permissions.
+  foreach ($drupal_permissions as $rid => $perms) {
+    user_role_change_permissions($rid, $perms);
+  }
+  // Set og_permissions.
+  foreach ($og_permissions as $rid => $perms) {
+    og_role_change_permissions($rid, $perms);
+  }
+}
+
+/**
+ * Implements hook_workbench_moderation_transition_save().
+ *
+ * Note: This depends on the patch from issue #2195479:
+ *       https://drupal.org/node/2195479
+ */
+function oa_workbench_workbench_moderation_transition_save($transition, $status) {
+  if ($status == MergeQuery::STATUS_INSERT) {
+    // Setup permissions the same way as we do for install.
+    oa_workbench_setup_default_permissions(array($transition));
+  }
+}
+
+/**
+ * Gets a Panels pane object representing the Workbench message pane.
+ *
+ * @return object
+ *   A Panels pane object.
+ */
+function oa_workbench_get_workbench_message_pane() {
+  $pane = new stdClass();
+  $pane->pid = 'new-f8f576b6-07a6-454f-b2eb-6a8b67d50af2';
+  $pane->panel = 'sidebar';
+  $pane->type = 'block';
+  $pane->subtype = 'workbench-block';
+  $pane->shown = TRUE;
+  $pane->access = array();
+  $pane->configuration = array(
+    'override_title' => 0,
+    'override_title_text' => '',
+  );
+  $pane->cache = array();
+  $pane->style = array(
+    'settings' => NULL,
+  );
+  $pane->css = array();
+  $pane->extras = array();
+  $pane->position = 0;
+  $pane->locks = array();
+  $pane->uuid = 'f8f576b6-07a6-454f-b2eb-6a8b67d50af2';
+
+  return $pane;
+}
+
+/**
+ * Gets a Panels pane object representing the Workbench Moderation State pane.
+ *
+ * @return object
+ *   A Panels pane object.
+ */
+function oa_workbench_get_workbench_state_pane() {
+  $pane = new stdClass();
+  $pane->pid = 'new-a5614425-0777-429d-8c23-89696ffc1bc7';
+  $pane->panel = 'sidebar';
+  $pane->type = 'oa_workbench_moderation_state';
+  $pane->subtype = 'oa_workbench_moderation_state';
+  $pane->shown = TRUE;
+  $pane->access = array();
+  $pane->configuration = array(
+    'context' => 'argument_node_edit_1',
+    'override_title' => 0,
+    'override_title_text' => '',
+  );
+  $pane->cache = array();
+  $pane->style = array(
+    'settings' => NULL,
+  );
+  $pane->css = array();
+  $pane->extras = array();
+  $pane->position = 1;
+  $pane->locks = array();
+  $pane->uuid = 'a5614425-0777-429d-8c23-89696ffc1bc7';
+
+  return $pane;
+}
+
+/**
+ * Implements hook_default_page_manager_handlers_alter().
+ */
+function oa_workbench_default_page_manager_handlers_alter(&$handlers) {
+  foreach ($handlers as &$handler) {
+    if ($handler->task == 'node_edit') {
+      $message_pane = oa_workbench_get_workbench_message_pane();
+      $state_pane = oa_workbench_get_workbench_state_pane();
+      if (!isset($handler->conf['display']->panels['sidebar'])) {
+        $handler->conf['display']->panels['sidebar'] = array();
+      }
+
+      // Add the workbench block to the top of the sidebar.
+      $handler->conf['display']->content[$state_pane->pid] = $state_pane;
+      $handler->conf['display']->content[$message_pane->pid] = $message_pane;
+      array_unshift($handler->conf['display']->panels['sidebar'], $state_pane->pid);
+      array_unshift($handler->conf['display']->panels['sidebar'], $message_pane->pid);
+    }
+  }
+}
+
+/**
+ * Implements hook_default_panels_mini_alter().
+ */
+function oa_workbench_default_panels_mini_alter(&$panels) {
+  if (isset($panels['section_sidebar_top'])) {
+    $pane = oa_workbench_get_workbench_message_pane();
+
+    // Add the workbench block to the top of the sidebar mini-panel.
+    $panels['section_sidebar_top']->display->content[$pane->pid] = $pane;
+    array_unshift($panels['section_sidebar_top']->display->panels['middle'], $pane->pid);
+  }
+}

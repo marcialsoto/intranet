@@ -1,0 +1,126 @@
+<?php
+/**
+ * @file
+ * Code for the Open Atrium Workbench Access module.
+ */
+
+/**
+ * Implements hook_oa_access_permission().
+ */
+function oa_workbench_access_oa_access_permission() {
+  // Ensure we're getting the latest list of transitions.
+  drupal_static_reset('workbench_moderation_transitions');
+
+  $perms = array();
+  foreach (workbench_moderation_transitions() as $transition) {
+    $from_state = $transition->from_name;
+    $to_state = $transition->to_name;
+
+    $perms[oa_workbench_permission_name($from_state, $to_state)] = array(
+      'title' => t('Moderate all content from %from_state to %to_state', array('%from_state' => workbench_moderation_state_label($from_state), '%to_state' => workbench_moderation_state_label($to_state))),
+      'type' => OA_ACCESS_DEFAULT_PERMISSION | OA_ACCESS_GROUP_DEFAULT_OPTION_ALL,
+      'combine' => OA_ACCESS_COMBINE_TEAM_OVERRIDE,
+    );
+  }
+  return $perms;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Adds a note to the 'Open Atrium Workbench' module section on the permissions
+ * admin page.
+ */
+function oa_workbench_access_form_oa_access_group_permissions_form_alter(&$form, &$form_state) {
+  $hide_descriptions = system_admin_compact_mode();
+  if (isset($form['permissions']['oa_workbench_access']) && !$hide_descriptions) {
+    $form['permissions']['oa_workbench_access']['#description'] = t('Warning: In order to perform a transition, the user must also have a <a href="!url">role with permission</a> to perform the transition.', array('!url' => url('admin/people/permissions', array('fragment' => 'module-workbench_moderation'))));
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ *
+ * Adds a note to the 'Open Atrium Workbench' module section on the permissions
+ * admin page.
+ */
+function oa_workbench_access_form_oa_access_team_permissions_form_alter(&$form, &$form_state) {
+  oa_workbench_access_form_oa_access_group_permissions_form_alter($form, $form_state);
+
+  // Get the NID of the current Space.
+  $gid = $form['#gid'];
+
+  // Get a list of valid permissions for the profile selected for this Space.
+  $valid_permissions = array();
+  if ($profile = workbench_moderation_profile_load(workbench_moderation_profile_og_get_profile($gid))) {
+    $transitions = field_get_items('workbench_moderation_profile', $profile, 'field_transitions', $profile);
+    foreach ($transitions as $key => $transition) {
+      $transition = workbench_moderation_transition_load($transition['target_id']);
+      $valid_permissions[oa_workbench_permission_name($transition->from_name, $transition->to_name)] = TRUE;
+    }
+  }
+
+  // Loop through the permissions on the form and hide invalid ones.
+  foreach (element_children($form['permissions']['oa_workbench_access']) as $key) {
+    if (!isset($valid_permissions[$key])) {
+      $form['permissions']['oa_workbench_access'][$key]['#access'] = FALSE;
+    }
+  }
+}
+
+/**
+ * Determines if the user can perform a transition.
+ *
+ * This is based on the user's membership in an Open Atrium Group or Team in
+ * the same way that user_access() is based on a user's membership in a role.
+ *
+ * @param object $space
+ *   The parent 'Space' of the node we want to perform the transition on.
+ * @param string $from_state
+ *   The machine name of the state we want to transition from.
+ * @param string $to_state
+ *   The machine name of the state we want to transition to.
+ * @param object|NULL $account
+ *   (Optional) A user object representing the user to check. If NULL, it will
+ *   check for the currently logged in user.
+ *
+ * @returns boolean
+ *   TRUE if the user has permission to perform the transition;
+ *   otherwise FALSE.
+ */
+function oa_workbench_access($space, $permission, $account = NULL) {
+  return oa_access($space, $permission, $account);
+}
+
+/**
+ * Implements hook_workbench_moderation_state_delete().
+ *
+ * Note: This depends on the patch from issue #2175891:
+ *       https://drupal.org/node/2175891
+ */
+function oa_workbench_access_workbench_moderation_state_delete($state) {
+  oa_access_cleanup_permissions('oa_workbench_access');
+}
+
+/**
+ * Implements hook_workbench_moderation_transition_save().
+ *
+ * Note: This depends on the patch from issue #2195479:
+ *       https://drupal.org/node/2195479
+ */
+function oa_workbench_access_workbench_moderation_transition_save($transition, $status) {
+  if ($status == MergeQuery::STATUS_INSERT) {
+    // Initialize the new permission that will be added.
+    oa_access_initialize_permissions(oa_workbench_permission_name($transition->from_name, $transition->to_name));
+  }
+}
+
+/**
+ * Implements hook_workbench_moderation_transition_delete().
+ *
+ * Note: This depends on the patch from issue #2175891:
+ *       https://drupal.org/node/2175891
+ */
+function oa_workbench_access_workbench_moderation_transition_delete($transition) {
+  oa_access_cleanup_permissions('oa_workbench_access');
+}
