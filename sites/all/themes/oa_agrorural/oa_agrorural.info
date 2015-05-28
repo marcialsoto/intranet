@@ -23,7 +23,7 @@ stylesheets-conditional[IE 7][all][] = assets/stylesheets/ie7.css
 stylesheets-conditional[IE 8][all][] = assets/stylesheets/ie8.css
 
 ; Javascript
-scripts[] = assets/javascripts/script.js
+scripts[] = assets/javascripts/oa_agrorural_script.js
 
 ; Information added by Drupal.org packaging script on 2015-05-04
 version = "7.x-3.12"
